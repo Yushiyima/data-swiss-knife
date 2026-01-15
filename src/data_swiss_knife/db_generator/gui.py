@@ -1,5 +1,6 @@
 """Modern GUI for PostgreSQL Table Generator using customtkinter."""
 
+import json
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from pathlib import Path
@@ -14,6 +15,35 @@ from .database import test_connection, create_table, insert_data_copy, get_schem
 # Set appearance
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
+
+# Config file for saved connections
+CONFIG_FILE = Path.home() / ".data_swiss_knife" / "connections.json"
+
+
+def load_saved_connections() -> dict:
+    """Load saved connections from config file."""
+    if CONFIG_FILE.exists():
+        try:
+            return json.loads(CONFIG_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def save_connection(name: str, conn_data: dict):
+    """Save a connection to config file."""
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    connections = load_saved_connections()
+    connections[name] = conn_data
+    CONFIG_FILE.write_text(json.dumps(connections, indent=2))
+
+
+def delete_connection(name: str):
+    """Delete a saved connection."""
+    connections = load_saved_connections()
+    if name in connections:
+        del connections[name]
+        CONFIG_FILE.write_text(json.dumps(connections, indent=2))
 
 
 class ModernCard(ctk.CTkFrame):
@@ -35,86 +65,103 @@ class ModernCard(ctk.CTkFrame):
 
 
 class ColumnRow(ctk.CTkFrame):
-    """A row for column configuration."""
+    """A row for column configuration with proper alignment."""
+
+    # Column widths for alignment
+    COL_WIDTHS = [180, 150, 170, 50, 60, 150]
 
     def __init__(self, master, col_name: str, col_info: dict, **kwargs):
         super().__init__(master, fg_color="transparent", height=40, **kwargs)
 
         self.col_name = col_name
-        self.grid_columnconfigure(1, weight=1)
+        self.col_info = col_info
+        self.is_date_type = col_info["detected_type"] in ("DATE", "TIMESTAMP")
 
-        # Column name
+        # Use grid for proper alignment
+        for i in range(6):
+            self.grid_columnconfigure(i, minsize=self.COL_WIDTHS[i])
+
+        # Column name (col 0)
         self.name_label = ctk.CTkLabel(
             self,
             text=col_name,
             font=ctk.CTkFont(size=13),
-            width=150,
             anchor="w",
         )
-        self.name_label.grid(row=0, column=0, padx=(0, 10), sticky="w")
+        self.name_label.grid(row=0, column=0, sticky="w", padx=(0, 5))
 
-        # Data type dropdown
+        # Data type dropdown (col 1)
         self.type_var = ctk.StringVar(value=col_info["pg_type"])
         self.type_menu = ctk.CTkOptionMenu(
             self,
             values=list(PG_TYPES.values()),
             variable=self.type_var,
             width=140,
-            height=32,
+            height=30,
             font=ctk.CTkFont(size=12),
+            command=self._on_type_change,
         )
-        self.type_menu.grid(row=0, column=1, padx=5, sticky="w")
+        self.type_menu.grid(row=0, column=1, sticky="w", padx=5)
 
-        # Date format dropdown
-        date_formats = ["Auto"] + DATE_FORMATS
+        # Date format dropdown (col 2) - only for date types
         self.date_var = ctk.StringVar(value=col_info.get("date_format") or "Auto")
         self.date_menu = ctk.CTkOptionMenu(
             self,
-            values=date_formats,
+            values=["Auto"] + DATE_FORMATS,
             variable=self.date_var,
             width=160,
-            height=32,
+            height=30,
             font=ctk.CTkFont(size=12),
         )
-        self.date_menu.grid(row=0, column=2, padx=5, sticky="w")
+        self.date_menu.grid(row=0, column=2, sticky="w", padx=5)
 
-        # Primary key checkbox
+        # Show/hide date format based on type
+        if not self.is_date_type:
+            self.date_menu.configure(state="disabled", fg_color="gray30")
+
+        # Primary key checkbox (col 3)
         self.pk_var = ctk.BooleanVar(value=False)
         self.pk_check = ctk.CTkCheckBox(
             self,
-            text="PK",
+            text="",
             variable=self.pk_var,
-            width=60,
-            font=ctk.CTkFont(size=12),
+            width=30,
             checkbox_width=20,
             checkbox_height=20,
         )
-        self.pk_check.grid(row=0, column=3, padx=10)
+        self.pk_check.grid(row=0, column=3, padx=5)
 
-        # Index checkbox
+        # Index checkbox (col 4)
         self.idx_var = ctk.BooleanVar(value=False)
         self.idx_check = ctk.CTkCheckBox(
             self,
-            text="Index",
+            text="",
             variable=self.idx_var,
-            width=70,
-            font=ctk.CTkFont(size=12),
+            width=30,
             checkbox_width=20,
             checkbox_height=20,
         )
-        self.idx_check.grid(row=0, column=4, padx=10)
+        self.idx_check.grid(row=0, column=4, padx=5)
 
-        # Sample values
-        samples = ", ".join(str(v)[:15] for v in col_info.get("sample_values", [])[:2])
+        # Sample values (col 5)
+        samples = ", ".join(str(v)[:20] for v in col_info.get("sample_values", [])[:2])
         self.sample_label = ctk.CTkLabel(
             self,
             text=samples if samples else "-",
             font=ctk.CTkFont(size=11),
             text_color="gray",
-            width=120,
             anchor="w",
         )
-        self.sample_label.grid(row=0, column=5, padx=(10, 0), sticky="w")
+        self.sample_label.grid(row=0, column=5, sticky="w", padx=5)
+
+    def _on_type_change(self, value: str):
+        """Handle data type change - enable/disable date format."""
+        is_date = value in ("DATE", "TIMESTAMP")
+        if is_date:
+            self.date_menu.configure(state="normal", fg_color=["#3B8ED0", "#1F6AA5"])
+        else:
+            self.date_menu.configure(state="disabled", fg_color="gray30")
+            self.date_var.set("Auto")
 
 
 class DBGeneratorApp(ctk.CTk):
@@ -135,6 +182,7 @@ class DBGeneratorApp(ctk.CTk):
         self.conn_str: str | None = None
 
         self._create_ui()
+        self._load_saved_connections()
 
     def _create_ui(self):
         """Create the modern UI."""
@@ -154,7 +202,6 @@ class DBGeneratorApp(ctk.CTk):
         title.pack(side="left")
 
         # Theme toggle
-        self.theme_var = ctk.StringVar(value="dark")
         theme_menu = ctk.CTkSegmentedButton(
             header,
             values=["Light", "Dark"],
@@ -169,7 +216,7 @@ class DBGeneratorApp(ctk.CTk):
         main.grid(row=1, column=0, sticky="ew", padx=20)
         main.grid_columnconfigure((0, 1), weight=1)
 
-        # Left column - File & Connection
+        # Left column - File
         left_col = ctk.CTkFrame(main, fg_color="transparent")
         left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
 
@@ -213,6 +260,48 @@ class DBGeneratorApp(ctk.CTk):
         # Database connection card
         db_card = ModernCard(right_col, "2. Database Connection")
         db_card.pack(fill="x")
+
+        # Saved connections row
+        saved_row = ctk.CTkFrame(db_card.content, fg_color="transparent")
+        saved_row.pack(fill="x", pady=(0, 10))
+
+        ctk.CTkLabel(
+            saved_row,
+            text="Saved:",
+            font=ctk.CTkFont(size=12),
+        ).pack(side="left")
+
+        self.saved_conn_menu = ctk.CTkOptionMenu(
+            saved_row,
+            values=["(Select)"],
+            width=150,
+            height=30,
+            font=ctk.CTkFont(size=12),
+            command=self._load_connection,
+        )
+        self.saved_conn_menu.pack(side="left", padx=(8, 5))
+
+        self.save_conn_btn = ctk.CTkButton(
+            saved_row,
+            text="Save",
+            width=60,
+            height=30,
+            font=ctk.CTkFont(size=12),
+            command=self._save_current_connection,
+        )
+        self.save_conn_btn.pack(side="left", padx=2)
+
+        self.delete_conn_btn = ctk.CTkButton(
+            saved_row,
+            text="Delete",
+            width=60,
+            height=30,
+            font=ctk.CTkFont(size=12),
+            fg_color="#F44336",
+            hover_color="#D32F2F",
+            command=self._delete_current_connection,
+        )
+        self.delete_conn_btn.pack(side="left", padx=2)
 
         # Connection fields in grid
         conn_grid = ctk.CTkFrame(db_card.content, fg_color="transparent")
@@ -288,7 +377,18 @@ class DBGeneratorApp(ctk.CTk):
             height=32,
             font=ctk.CTkFont(size=12),
         )
-        self.schema_menu.pack(side="left", padx=(8, 20))
+        self.schema_menu.pack(side="left", padx=(8, 5))
+
+        # Refresh schemas button
+        self.refresh_schema_btn = ctk.CTkButton(
+            table_row,
+            text="Refresh",
+            width=70,
+            height=32,
+            font=ctk.CTkFont(size=12),
+            command=self._refresh_schemas,
+        )
+        self.refresh_schema_btn.pack(side="left", padx=(0, 20))
 
         ctk.CTkLabel(
             table_row,
@@ -305,27 +405,27 @@ class DBGeneratorApp(ctk.CTk):
         )
         self.table_entry.pack(side="left", padx=8)
 
-        # Column headers
+        # Column headers with proper alignment
         header_frame = ctk.CTkFrame(columns_card.content, fg_color="transparent")
         header_frame.pack(fill="x", pady=(0, 8))
 
         headers = [
-            ("Column Name", 150),
-            ("Data Type", 145),
-            ("Date Format", 165),
-            ("PK", 60),
-            ("Index", 70),
-            ("Sample", 120),
+            ("Column Name", 180),
+            ("Data Type", 150),
+            ("Date Format", 170),
+            ("PK", 50),
+            ("Index", 60),
+            ("Sample Values", 150),
         ]
 
-        for text, width in headers:
+        for i, (text, width) in enumerate(headers):
+            header_frame.grid_columnconfigure(i, minsize=width)
             ctk.CTkLabel(
                 header_frame,
                 text=text,
                 font=ctk.CTkFont(size=12, weight="bold"),
-                width=width,
                 anchor="w",
-            ).pack(side="left", padx=5)
+            ).grid(row=0, column=i, sticky="w", padx=5)
 
         # Scrollable columns area
         self.columns_scroll = ctk.CTkScrollableFrame(
@@ -385,6 +485,64 @@ class DBGeneratorApp(ctk.CTk):
     def _toggle_theme(self, value: str):
         """Toggle between light and dark theme."""
         ctk.set_appearance_mode(value.lower())
+
+    def _load_saved_connections(self):
+        """Load saved connections into dropdown."""
+        connections = load_saved_connections()
+        if connections:
+            self.saved_conn_menu.configure(values=["(Select)"] + list(connections.keys()))
+        else:
+            self.saved_conn_menu.configure(values=["(Select)"])
+
+    def _load_connection(self, name: str):
+        """Load a saved connection into fields."""
+        if name == "(Select)":
+            return
+
+        connections = load_saved_connections()
+        if name in connections:
+            conn = connections[name]
+            for key, entry in self.db_entries.items():
+                entry.delete(0, "end")
+                entry.insert(0, conn.get(key, ""))
+
+    def _save_current_connection(self):
+        """Save current connection settings."""
+        dialog = ctk.CTkInputDialog(
+            text="Enter a name for this connection:",
+            title="Save Connection",
+        )
+        name = dialog.get_input()
+
+        if name and name.strip():
+            conn_data = {key: entry.get() for key, entry in self.db_entries.items()}
+            save_connection(name.strip(), conn_data)
+            self._load_saved_connections()
+            self.saved_conn_menu.set(name.strip())
+            messagebox.showinfo("Saved", f"Connection '{name}' saved successfully!")
+
+    def _delete_current_connection(self):
+        """Delete the currently selected saved connection."""
+        name = self.saved_conn_menu.get()
+        if name == "(Select)":
+            messagebox.showwarning("Warning", "Please select a connection to delete")
+            return
+
+        if messagebox.askyesno("Confirm", f"Delete connection '{name}'?"):
+            delete_connection(name)
+            self._load_saved_connections()
+            self.saved_conn_menu.set("(Select)")
+            messagebox.showinfo("Deleted", f"Connection '{name}' deleted")
+
+    def _refresh_schemas(self):
+        """Refresh the schema list from database."""
+        if not self.conn_str:
+            messagebox.showwarning("Warning", "Please test connection first")
+            return
+
+        schemas = get_schemas(self.conn_str)
+        self.schema_menu.configure(values=schemas)
+        self.status_label.configure(text=f"Loaded {len(schemas)} schemas")
 
     def _browse_file(self):
         """Open file browser."""
