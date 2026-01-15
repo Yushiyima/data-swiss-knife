@@ -1,8 +1,10 @@
 """Threaded query executor for parameterized queries."""
 
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
@@ -16,6 +18,33 @@ class QueryResult:
     data: pd.DataFrame | None
     error: str | None
     row_count: int
+    execution_time: float = 0.0
+
+
+@dataclass
+class ExecutionStats:
+    """Statistics for query execution."""
+    total: int = 0
+    completed: int = 0
+    success: int = 0
+    errors: int = 0
+    start_time: float = 0.0
+    elapsed_time: float = 0.0
+    avg_time_per_query: float = 0.0
+    estimated_remaining: float = 0.0
+
+    def format_time(self, seconds: float) -> str:
+        """Format seconds into human readable string."""
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+        elif seconds < 3600:
+            mins = int(seconds // 60)
+            secs = int(seconds % 60)
+            return f"{mins}m {secs}s"
+        else:
+            hours = int(seconds // 3600)
+            mins = int((seconds % 3600) // 60)
+            return f"{hours}h {mins}m"
 
 
 def extract_parameters(query: str) -> list[str]:
@@ -46,6 +75,7 @@ def execute_single_query(
     params: dict[str, Any],
 ) -> QueryResult:
     """Execute a single query with given parameters."""
+    start_time = time.time()
     try:
         sql, values = substitute_params(query, params)
 
@@ -58,13 +88,25 @@ def execute_single_query(
                     columns = [desc[0] for desc in cur.description]
                     rows = cur.fetchall()
                     df = pd.DataFrame(rows, columns=columns)
-                    return QueryResult(params=params, data=df, error=None, row_count=len(df))
+                    exec_time = time.time() - start_time
+                    return QueryResult(
+                        params=params, data=df, error=None,
+                        row_count=len(df), execution_time=exec_time
+                    )
                 else:
                     conn.commit()
-                    return QueryResult(params=params, data=None, error=None, row_count=cur.rowcount)
+                    exec_time = time.time() - start_time
+                    return QueryResult(
+                        params=params, data=None, error=None,
+                        row_count=cur.rowcount, execution_time=exec_time
+                    )
 
     except Exception as e:
-        return QueryResult(params=params, data=None, error=str(e), row_count=0)
+        exec_time = time.time() - start_time
+        return QueryResult(
+            params=params, data=None, error=str(e),
+            row_count=0, execution_time=exec_time
+        )
 
 
 def execute_param_query(conn_str: str, query: str, params: dict[str, Any]) -> pd.DataFrame:
@@ -92,9 +134,10 @@ class ThreadedQueryExecutor:
         self.max_workers = max_workers
         self.results: list[QueryResult] = []
         self.progress_callback = None
+        self.stats = ExecutionStats()
 
     def set_progress_callback(self, callback):
-        """Set callback for progress updates: callback(completed, total)."""
+        """Set callback for progress updates: callback(stats: ExecutionStats)."""
         self.progress_callback = callback
 
     def execute(
@@ -105,7 +148,12 @@ class ThreadedQueryExecutor:
         """Execute query for all parameter combinations."""
         self.results = []
         total = len(param_combinations)
-        completed = 0
+
+        self.stats = ExecutionStats(
+            total=total,
+            completed=0,
+            start_time=time.time(),
+        )
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {
@@ -118,10 +166,24 @@ class ThreadedQueryExecutor:
             for future in as_completed(futures):
                 result = future.result()
                 self.results.append(result)
-                completed += 1
+
+                # Update stats
+                self.stats.completed += 1
+                if result.error:
+                    self.stats.errors += 1
+                else:
+                    self.stats.success += 1
+
+                self.stats.elapsed_time = time.time() - self.stats.start_time
+
+                # Calculate average and ETA
+                if self.stats.completed > 0:
+                    self.stats.avg_time_per_query = self.stats.elapsed_time / self.stats.completed
+                    remaining = self.stats.total - self.stats.completed
+                    self.stats.estimated_remaining = remaining * self.stats.avg_time_per_query
 
                 if self.progress_callback:
-                    self.progress_callback(completed, total)
+                    self.progress_callback(self.stats)
 
         return self.results
 
@@ -147,3 +209,7 @@ class ThreadedQueryExecutor:
     def get_success_count(self) -> int:
         """Get count of successful executions."""
         return sum(1 for r in self.results if r.error is None)
+
+    def get_total_execution_time(self) -> float:
+        """Get total execution time."""
+        return self.stats.elapsed_time
