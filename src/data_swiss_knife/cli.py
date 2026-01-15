@@ -15,9 +15,21 @@ def main() -> None:
         version="%(prog)s 0.1.0",
     )
 
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # DB Generator command
+    db_parser = subparsers.add_parser(
+        "db-generator",
+        help="Launch the PostgreSQL table generator GUI",
+    )
+
     args = parser.parse_args()
 
-    print("Data Swiss Knife - Ready to process your data!")
+    if args.command == "db-generator":
+        from .db_generator import run_app
+        run_app()
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":

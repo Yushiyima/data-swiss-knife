@@ -10,9 +10,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 authors = [
-    { name = "Your Name", email = "your.email@example.com" }
+    { name = "Ege Can Kapar", email = "142752113+Yushiyima@users.noreply.github.com" }
 ]
-keywords = ["data", "processing", "toolkit", "utility"]
+keywords = ["data", "processing", "toolkit", "utility", "postgresql", "database"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -21,7 +21,11 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
-dependencies = []
+dependencies = [
+    "pandas>=2.2",
+    "openpyxl>=3.1",
+    "psycopg[binary]>=3.1",
+]
 
 [project.optional-dependencies]
 dev = [
