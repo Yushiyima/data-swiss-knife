@@ -3,9 +3,10 @@
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from io import StringIO
+from typing import Any, Callable
 
 import pandas as pd
 import psycopg
@@ -19,6 +20,7 @@ class QueryResult:
     error: str | None
     row_count: int
     execution_time: float = 0.0
+    rows_inserted: int = 0
 
 
 @dataclass
@@ -28,6 +30,8 @@ class ExecutionStats:
     completed: int = 0
     success: int = 0
     errors: int = 0
+    rows_fetched: int = 0
+    rows_inserted: int = 0
     start_time: float = 0.0
     elapsed_time: float = 0.0
     avg_time_per_query: float = 0.0
@@ -69,6 +73,31 @@ def substitute_params(query: str, params: dict[str, Any]) -> tuple[str, list]:
     return new_query, values
 
 
+def stream_insert_df(conn_str: str, df: pd.DataFrame, schema: str, table_name: str) -> int:
+    """Insert DataFrame to table using COPY (fast). Returns rows inserted."""
+    if df.empty:
+        return 0
+
+    try:
+        buffer = StringIO()
+        df.to_csv(buffer, index=False, header=False, sep='\t', na_rep='\\N')
+        buffer.seek(0)
+
+        columns = [f'"{c}"' for c in df.columns]
+        copy_sql = f'COPY "{schema}"."{table_name}" ({", ".join(columns)}) FROM STDIN WITH (FORMAT CSV, DELIMITER E\'\\t\', NULL \'\\N\')'
+
+        with psycopg.connect(conn_str) as conn:
+            with conn.cursor() as cur:
+                with cur.copy(copy_sql) as copy:
+                    for line in buffer:
+                        copy.write(line)
+                conn.commit()
+
+        return len(df)
+    except Exception:
+        return 0
+
+
 def execute_single_query(
     conn_str: str,
     query: str,
@@ -92,6 +121,61 @@ def execute_single_query(
                     return QueryResult(
                         params=params, data=df, error=None,
                         row_count=len(df), execution_time=exec_time
+                    )
+                else:
+                    conn.commit()
+                    exec_time = time.time() - start_time
+                    return QueryResult(
+                        params=params, data=None, error=None,
+                        row_count=cur.rowcount, execution_time=exec_time
+                    )
+
+    except Exception as e:
+        exec_time = time.time() - start_time
+        return QueryResult(
+            params=params, data=None, error=str(e),
+            row_count=0, execution_time=exec_time
+        )
+
+
+def execute_and_stream(
+    conn_str: str,
+    query: str,
+    params: dict[str, Any],
+    target_conn_str: str,
+    target_schema: str,
+    target_table: str,
+    add_param_columns: bool = True,
+) -> QueryResult:
+    """Execute query and immediately stream results to target table."""
+    start_time = time.time()
+    try:
+        sql, values = substitute_params(query, params)
+
+        with psycopg.connect(conn_str) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, values)
+
+                if cur.description:
+                    columns = [desc[0] for desc in cur.description]
+                    rows = cur.fetchall()
+                    df = pd.DataFrame(rows, columns=columns)
+
+                    # Add parameter columns
+                    if add_param_columns:
+                        for key, value in params.items():
+                            df[f'_param_{key}'] = value
+
+                    # Stream to target table immediately
+                    rows_inserted = stream_insert_df(
+                        target_conn_str, df, target_schema, target_table
+                    )
+
+                    exec_time = time.time() - start_time
+                    return QueryResult(
+                        params=params, data=None, error=None,
+                        row_count=len(df), execution_time=exec_time,
+                        rows_inserted=rows_inserted
                     )
                 else:
                     conn.commit()
@@ -173,6 +257,67 @@ class ThreadedQueryExecutor:
                     self.stats.errors += 1
                 else:
                     self.stats.success += 1
+                    self.stats.rows_fetched += result.row_count
+
+                self.stats.elapsed_time = time.time() - self.stats.start_time
+
+                # Calculate average and ETA
+                if self.stats.completed > 0:
+                    self.stats.avg_time_per_query = self.stats.elapsed_time / self.stats.completed
+                    remaining = self.stats.total - self.stats.completed
+                    self.stats.estimated_remaining = remaining * self.stats.avg_time_per_query
+
+                if self.progress_callback:
+                    self.progress_callback(self.stats)
+
+        return self.results
+
+    def execute_with_streaming(
+        self,
+        query: str,
+        param_combinations: list[dict[str, Any]],
+        target_conn_str: str,
+        target_schema: str,
+        target_table: str,
+        add_param_columns: bool = True,
+    ) -> list[QueryResult]:
+        """Execute queries and stream results to target table immediately."""
+        self.results = []
+        total = len(param_combinations)
+
+        self.stats = ExecutionStats(
+            total=total,
+            completed=0,
+            start_time=time.time(),
+        )
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = {
+                executor.submit(
+                    execute_and_stream,
+                    self.conn_str,
+                    query,
+                    params,
+                    target_conn_str,
+                    target_schema,
+                    target_table,
+                    add_param_columns,
+                ): params
+                for params in param_combinations
+            }
+
+            for future in as_completed(futures):
+                result = future.result()
+                self.results.append(result)
+
+                # Update stats
+                self.stats.completed += 1
+                if result.error:
+                    self.stats.errors += 1
+                else:
+                    self.stats.success += 1
+                    self.stats.rows_fetched += result.row_count
+                    self.stats.rows_inserted += result.rows_inserted
 
                 self.stats.elapsed_time = time.time() - self.stats.start_time
 

@@ -10,7 +10,7 @@ import pandas as pd
 
 from ..db_generator.gui import load_saved_connections, save_connection, ModernCard
 from ..db_generator.database import get_schemas, test_connection
-from .executor import ThreadedQueryExecutor, extract_parameters, execute_param_query, ExecutionStats
+from .executor import ThreadedQueryExecutor, extract_parameters, execute_param_query, execute_single_query, ExecutionStats
 from .parameters import ParameterManager, PARAM_TYPES, DATE_FORMATS
 from .output import export_to_csv, export_to_excel, insert_to_table, create_and_insert
 
@@ -410,15 +410,23 @@ class QueryRunnerApp(ctk.CTk):
         self.thread_label.pack(side="left")
         self.thread_slider.configure(command=lambda v: self.thread_label.configure(text=str(int(v))))
 
-        # Output options
-        output_row = ctk.CTkFrame(exec_card.content, fg_color="transparent")
-        output_row.pack(fill="x", pady=(0, 10))
+        # Output options - row 1
+        output_row1 = ctk.CTkFrame(exec_card.content, fg_color="transparent")
+        output_row1.pack(fill="x", pady=(0, 5))
 
-        ctk.CTkLabel(output_row, text="Output:").pack(side="left")
+        ctk.CTkLabel(output_row1, text="Output:").pack(side="left")
         self.output_var = ctk.StringVar(value="preview")
-        for text, value in [("Preview", "preview"), ("CSV", "csv"), ("Excel", "excel"),
-                            ("Insert", "insert"), ("Create+Insert", "create_insert")]:
-            ctk.CTkRadioButton(output_row, text=text, variable=self.output_var, value=value).pack(side="left", padx=8)
+        for text, value in [("Preview", "preview"), ("CSV", "csv"), ("Excel", "excel")]:
+            ctk.CTkRadioButton(output_row1, text=text, variable=self.output_var, value=value).pack(side="left", padx=8)
+
+        # Output options - row 2 (DB options)
+        output_row2 = ctk.CTkFrame(exec_card.content, fg_color="transparent")
+        output_row2.pack(fill="x", pady=(0, 10))
+
+        ctk.CTkLabel(output_row2, text="          ").pack(side="left")  # spacer
+        for text, value in [("Batch Insert", "insert"), ("Create+Insert", "create_insert"),
+                            ("Stream to DB", "stream")]:
+            ctk.CTkRadioButton(output_row2, text=text, variable=self.output_var, value=value).pack(side="left", padx=8)
 
         # Schema/Table for DB output
         db_row = ctk.CTkFrame(exec_card.content, fg_color="transparent")
@@ -433,6 +441,14 @@ class QueryRunnerApp(ctk.CTk):
         self.out_table.pack(side="left", padx=5)
 
         ctk.CTkButton(db_row, text="Refresh", width=70, command=self._refresh_schemas).pack(side="left", padx=5)
+
+        # Create table checkbox (for stream mode)
+        self.create_table_var = ctk.BooleanVar(value=True)
+        self.create_table_check = ctk.CTkCheckBox(
+            db_row, text="Create table first", variable=self.create_table_var,
+            font=ctk.CTkFont(size=11),
+        )
+        self.create_table_check.pack(side="left", padx=15)
 
         # Run section with ETA
         run_row = ctk.CTkFrame(exec_card.content, fg_color="transparent")
@@ -559,6 +575,15 @@ class QueryRunnerApp(ctk.CTk):
             messagebox.showwarning("Warning", "Please enter a query")
             return
 
+        output_type = self.output_var.get()
+
+        # Validate DB output options
+        if output_type in ("insert", "create_insert", "stream"):
+            table = self.out_table.get().strip()
+            if not table:
+                messagebox.showwarning("Warning", "Please enter table name for DB output")
+                return
+
         self._update_combo_count()
         combinations = self.param_manager.generate_combinations()
         if not combinations or combinations == [{}]:
@@ -570,6 +595,12 @@ class QueryRunnerApp(ctk.CTk):
         self.run_btn.configure(state="disabled", text="Running...")
         self.progress.set(0)
         self.eta_label.configure(text="Calculating...")
+
+        # Store output config for use in thread
+        stream_mode = output_type == "stream"
+        target_schema = self.out_schema.get()
+        target_table = self.out_table.get().strip()
+        create_table = self.create_table_var.get()
 
         def run():
             executor = ThreadedQueryExecutor(self.conn_str, max_workers=thread_count)
@@ -583,17 +614,60 @@ class QueryRunnerApp(ctk.CTk):
                 self.after(0, lambda: self.eta_label.configure(
                     text=f"Elapsed: {elapsed} | ETA: {eta}"
                 ))
-                self.after(0, lambda: self.results_info.configure(
-                    text=f"Running: {stats.completed}/{stats.total} ({stats.success} ok, {stats.errors} errors)"
-                ))
+
+                if stream_mode:
+                    self.after(0, lambda: self.results_info.configure(
+                        text=f"Streaming: {stats.completed}/{stats.total} | "
+                             f"Rows: {stats.rows_fetched:,} fetched, {stats.rows_inserted:,} inserted"
+                    ))
+                else:
+                    self.after(0, lambda: self.results_info.configure(
+                        text=f"Running: {stats.completed}/{stats.total} ({stats.success} ok, {stats.errors} errors)"
+                    ))
 
             executor.set_progress_callback(on_progress)
-            executor.execute(query, combinations)
-            self.results_df = executor.get_combined_results()
+
+            if stream_mode:
+                # Create table first if requested
+                if create_table:
+                    # Run one query to get schema, then create table
+                    if combinations:
+                        first_result = execute_single_query(self.conn_str, query, combinations[0])
+                        if first_result.data is not None and not first_result.data.empty:
+                            # Add param columns to schema
+                            df_schema = first_result.data.copy()
+                            for key in combinations[0].keys():
+                                df_schema[f'_param_{key}'] = None
+
+                            from .output import create_and_insert
+                            # Create empty table with schema
+                            success, msg, _ = create_and_insert(
+                                self.conn_str, df_schema.head(0),
+                                target_schema, target_table
+                            )
+                            if not success:
+                                self.after(0, lambda: messagebox.showerror("Error", f"Failed to create table: {msg}"))
+                                self.after(0, lambda: self._reset_ui())
+                                return
+
+                # Execute with streaming
+                executor.execute_with_streaming(
+                    query, combinations,
+                    self.conn_str, target_schema, target_table
+                )
+                self.results_df = pd.DataFrame()  # No results stored in memory
+            else:
+                executor.execute(query, combinations)
+                self.results_df = executor.get_combined_results()
 
             self.after(0, lambda: self._on_queries_complete(executor))
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _reset_ui(self):
+        """Reset UI after error."""
+        self.is_running = False
+        self.run_btn.configure(state="normal", text="Run Query")
 
     def _on_queries_complete(self, executor: ThreadedQueryExecutor):
         self.is_running = False
@@ -601,11 +675,19 @@ class QueryRunnerApp(ctk.CTk):
 
         stats = executor.stats
         elapsed = stats.format_time(stats.elapsed_time)
+        output_type = self.output_var.get()
 
-        self.results_info.configure(
-            text=f"Completed: {stats.success} success, {stats.errors} errors, "
-                 f"{len(self.results_df)} rows | Time: {elapsed}"
-        )
+        if output_type == "stream":
+            self.results_info.configure(
+                text=f"Completed: {stats.success} success, {stats.errors} errors | "
+                     f"Rows: {stats.rows_fetched:,} fetched, {stats.rows_inserted:,} inserted | Time: {elapsed}"
+            )
+        else:
+            row_count = len(self.results_df) if self.results_df is not None else 0
+            self.results_info.configure(
+                text=f"Completed: {stats.success} success, {stats.errors} errors, "
+                     f"{row_count:,} rows | Time: {elapsed}"
+            )
         self.eta_label.configure(text=f"Done in {elapsed}")
 
         output_type = self.output_var.get()
@@ -652,6 +734,16 @@ class QueryRunnerApp(ctk.CTk):
                 self.conn_str, self.results_df, self.out_schema.get(), table
             )
             messagebox.showinfo("Create & Insert", msg)
+
+        elif output_type == "stream":
+            table = self.out_table.get().strip()
+            schema = self.out_schema.get()
+            messagebox.showinfo(
+                "Stream Complete",
+                f"Streamed {stats.rows_inserted:,} rows to {schema}.{table}\n"
+                f"Queries: {stats.success} success, {stats.errors} errors\n"
+                f"Time: {elapsed}"
+            )
 
 
 def run_app():
