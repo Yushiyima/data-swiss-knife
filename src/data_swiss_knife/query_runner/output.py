@@ -6,6 +6,8 @@ from pathlib import Path
 import pandas as pd
 import psycopg
 
+CONNECTION_TIMEOUT = 15  # seconds
+
 
 def export_to_csv(df: pd.DataFrame, file_path: str | Path) -> tuple[bool, str]:
     """Export DataFrame to CSV file."""
@@ -43,7 +45,8 @@ def insert_to_table(
         columns = [f'"{c}"' for c in df.columns]
         copy_sql = f'COPY "{schema}"."{table_name}" ({", ".join(columns)}) FROM STDIN WITH (FORMAT CSV, DELIMITER E\'\\t\', NULL \'\\N\')'
 
-        with psycopg.connect(conn_str) as conn:
+        conn_with_timeout = f"{conn_str} connect_timeout={CONNECTION_TIMEOUT}"
+        with psycopg.connect(conn_with_timeout) as conn:
             with conn.cursor() as cur:
                 with cur.copy(copy_sql) as copy:
                     for line in buffer:
@@ -51,6 +54,10 @@ def insert_to_table(
                 conn.commit()
 
         return True, f"Inserted {len(df)} rows into {schema}.{table_name}", len(df)
+    except psycopg.OperationalError as e:
+        if "timeout" in str(e).lower():
+            return False, f"Connection timeout after {CONNECTION_TIMEOUT} seconds", 0
+        return False, str(e), 0
     except Exception as e:
         return False, str(e), 0
 
@@ -83,14 +90,14 @@ def create_and_insert(
             col_defs.append(f'"{col}" {pg_type}')
 
         create_sql = f"""
-        CREATE TABLE IF NOT EXISTS "{schema}"."{table_name}" (
+        CREATE TABLE "{schema}"."{table_name}" (
             {", ".join(col_defs)}
         )
         """
 
-        with psycopg.connect(conn_str) as conn:
+        conn_with_timeout = f"{conn_str} connect_timeout={CONNECTION_TIMEOUT}"
+        with psycopg.connect(conn_with_timeout) as conn:
             with conn.cursor() as cur:
-                cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
                 cur.execute(f'DROP TABLE IF EXISTS "{schema}"."{table_name}"')
                 cur.execute(create_sql)
                 conn.commit()
@@ -98,6 +105,10 @@ def create_and_insert(
         # Insert data
         return insert_to_table(conn_str, df, schema, table_name)
 
+    except psycopg.OperationalError as e:
+        if "timeout" in str(e).lower():
+            return False, f"Connection timeout after {CONNECTION_TIMEOUT} seconds", 0
+        return False, str(e), 0
     except Exception as e:
         return False, str(e), 0
 
@@ -105,7 +116,8 @@ def create_and_insert(
 def get_tables(conn_str: str, schema: str) -> list[str]:
     """Get list of tables in schema."""
     try:
-        with psycopg.connect(conn_str) as conn:
+        conn_with_timeout = f"{conn_str} connect_timeout={CONNECTION_TIMEOUT}"
+        with psycopg.connect(conn_with_timeout) as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT table_name

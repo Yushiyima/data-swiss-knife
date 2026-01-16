@@ -10,7 +10,7 @@ import pandas as pd
 
 from ..db_generator.gui import load_saved_connections, save_connection, ModernCard
 from ..db_generator.database import get_schemas, test_connection
-from .executor import ThreadedQueryExecutor, extract_parameters, execute_param_query, execute_single_query, ExecutionStats
+from .executor import ThreadedQueryExecutor, extract_parameters, execute_param_query, ExecutionStats
 from .parameters import ParameterManager, PARAM_TYPES, DATE_FORMATS
 from .output import export_to_csv, export_to_excel, insert_to_table, create_and_insert
 
@@ -442,14 +442,6 @@ class QueryRunnerApp(ctk.CTk):
 
         ctk.CTkButton(db_row, text="Refresh", width=70, command=self._refresh_schemas).pack(side="left", padx=5)
 
-        # Create table checkbox (for stream mode)
-        self.create_table_var = ctk.BooleanVar(value=True)
-        self.create_table_check = ctk.CTkCheckBox(
-            db_row, text="Create table first", variable=self.create_table_var,
-            font=ctk.CTkFont(size=11),
-        )
-        self.create_table_check.pack(side="left", padx=15)
-
         # Run section with ETA
         run_row = ctk.CTkFrame(exec_card.content, fg_color="transparent")
         run_row.pack(fill="x", pady=(10, 0))
@@ -600,7 +592,6 @@ class QueryRunnerApp(ctk.CTk):
         stream_mode = output_type == "stream"
         target_schema = self.out_schema.get()
         target_table = self.out_table.get().strip()
-        create_table = self.create_table_var.get()
 
         def run():
             executor = ThreadedQueryExecutor(self.conn_str, max_workers=thread_count)
@@ -628,29 +619,7 @@ class QueryRunnerApp(ctk.CTk):
             executor.set_progress_callback(on_progress)
 
             if stream_mode:
-                # Create table first if requested
-                if create_table:
-                    # Run one query to get schema, then create table
-                    if combinations:
-                        first_result = execute_single_query(self.conn_str, query, combinations[0])
-                        if first_result.data is not None and not first_result.data.empty:
-                            # Add param columns to schema
-                            df_schema = first_result.data.copy()
-                            for key in combinations[0].keys():
-                                df_schema[f'_param_{key}'] = None
-
-                            from .output import create_and_insert
-                            # Create empty table with schema
-                            success, msg, _ = create_and_insert(
-                                self.conn_str, df_schema.head(0),
-                                target_schema, target_table
-                            )
-                            if not success:
-                                self.after(0, lambda: messagebox.showerror("Error", f"Failed to create table: {msg}"))
-                                self.after(0, lambda: self._reset_ui())
-                                return
-
-                # Execute with streaming
+                # Execute with streaming - insert into existing table
                 executor.execute_with_streaming(
                     query, combinations,
                     self.conn_str, target_schema, target_table

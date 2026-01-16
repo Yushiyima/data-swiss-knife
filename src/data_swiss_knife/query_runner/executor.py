@@ -11,6 +11,8 @@ from typing import Any, Callable
 import pandas as pd
 import psycopg
 
+CONNECTION_TIMEOUT = 15  # seconds
+
 
 @dataclass
 class QueryResult:
@@ -86,7 +88,8 @@ def stream_insert_df(conn_str: str, df: pd.DataFrame, schema: str, table_name: s
         columns = [f'"{c}"' for c in df.columns]
         copy_sql = f'COPY "{schema}"."{table_name}" ({", ".join(columns)}) FROM STDIN WITH (FORMAT CSV, DELIMITER E\'\\t\', NULL \'\\N\')'
 
-        with psycopg.connect(conn_str) as conn:
+        conn_with_timeout = f"{conn_str} connect_timeout={CONNECTION_TIMEOUT}"
+        with psycopg.connect(conn_with_timeout) as conn:
             with conn.cursor() as cur:
                 with cur.copy(copy_sql) as copy:
                     for line in buffer:
@@ -108,7 +111,8 @@ def execute_single_query(
     try:
         sql, values = substitute_params(query, params)
 
-        with psycopg.connect(conn_str) as conn:
+        conn_with_timeout = f"{conn_str} connect_timeout={CONNECTION_TIMEOUT}"
+        with psycopg.connect(conn_with_timeout) as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, values)
 
@@ -152,7 +156,8 @@ def execute_and_stream(
     try:
         sql, values = substitute_params(query, params)
 
-        with psycopg.connect(conn_str) as conn:
+        conn_with_timeout = f"{conn_str} connect_timeout={CONNECTION_TIMEOUT}"
+        with psycopg.connect(conn_with_timeout) as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, values)
 
@@ -198,7 +203,8 @@ def execute_param_query(conn_str: str, query: str, params: dict[str, Any]) -> pd
     try:
         sql, values = substitute_params(query, params)
 
-        with psycopg.connect(conn_str) as conn:
+        conn_with_timeout = f"{conn_str} connect_timeout={CONNECTION_TIMEOUT}"
+        with psycopg.connect(conn_with_timeout) as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, values)
                 if cur.description:
